@@ -10,3 +10,143 @@ from tensorflow.keras.utils import image_dataset_from_directory
 from tensorflow.keras import layers, Sequential
 from tensorflow.keras.layers import Dense, Conv2D, MaxPooling2D, Flatten, Dropout, BatchNormalization
 from tensorflow.keras.callbacks import ReduceLROnPlateau, EarlyStopping
+
+
+path = os.getcwd()
+train_path = os.path.join(path, 'data', 'train')
+test_path = os.path.join(path, 'data', 'test')
+val_path = os.path.join(path, 'data', 'val')
+
+def img_preprocessing (directory, shufle):
+  dataset = image_dataset_from_directory(
+      directory,
+      label_mode = 'binary',
+      image_size = (224, 224),
+      batch_size = 32,
+      color_mode = 'grayscale',
+      shuffle = shufle
+  )
+  return dataset
+
+train_dataset = img_preprocessing(train_path, True)
+test_dataset = img_preprocessing(test_path, False)
+val_dataset = img_preprocessing(val_path, False)
+
+for images, labels in train_dataset.take(1):
+    plt.figure(figsize=(10, 10))
+    for i in range(9):
+        ax = plt.subplot(3, 3, i + 1)
+        # Squeeze the (224, 224, 1) to (224, 224) for plotting
+        plt.imshow(images[i].numpy().astype("uint8").squeeze(), cmap='gray')
+
+        # Determine the label name
+        label = int(labels[i])
+        class_name = train_dataset.class_names[label]
+
+        plt.title(f"{class_name} ({label})")
+        plt.axis("off")
+    plt.show()
+
+data_augmentation = Sequential([
+    layers.RandomRotation(factor=0.08), #30deg rotation
+    layers.RandomZoom(height_factor=0.1, width_factor=0.1), # 10% zoom
+    layers.RandomTranslation(height_factor=0.1, width_factor=0.1), #10% left/right translation
+    layers.RandomContrast(factor=0.1) # range [1.0 - 0.1, 1.0 + 0.1]
+])
+
+# Quick test on one image
+for images, _ in train_dataset.take(1):
+    augmented_images = data_augmentation(images, training=True)
+    plt.imshow(augmented_images[1].numpy().astype("uint8").squeeze(), cmap='gray')
+    plt.title("Check the corners for 'nearest' fill")
+    plt.show()
+
+train_dataset.class_names
+
+class_weights = {0: 3, 1: 1}
+print(f"Weights: {class_weights}")
+
+model = Sequential([
+    #Input
+    layers.Input(shape = (224, 224, 1)),
+
+    #Preprocessing
+    layers.Rescaling(1./255),
+    data_augmentation,
+
+    #Feature Extration
+    Conv2D(32, kernel_size=(3,3), activation='relu', padding= 'same'),
+    layers.BatchNormalization(),
+    MaxPooling2D(pool_size=(2,2)),
+
+    Conv2D(64, kernel_size=(3,3), activation='relu', padding= 'same'),
+    layers.BatchNormalization(),
+    MaxPooling2D(pool_size=(2,2)),
+
+    Conv2D(128, kernel_size=(3,3), activation='relu', padding= 'same'),
+    layers.BatchNormalization(),
+    MaxPooling2D(pool_size=(2,2)),
+
+    Conv2D(256, kernel_size=(3,3), activation='relu', padding= 'same'),
+    layers.BatchNormalization(),
+    MaxPooling2D(pool_size=(2,2)),
+
+    #Classification
+    Flatten(),
+    layers.Dense(128, activation='relu'),
+    layers.Dropout(0.2),
+    layers.Dense(1, activation='sigmoid')
+])
+
+model.summary()
+
+model.compile(
+    optimizer = 'adam',
+    loss = 'binary_crossentropy',
+    metrics = ['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
+)
+
+lr_reduction = ReduceLROnPlateau(
+    monitor='val_loss',
+    patience=2,      # Wait 2 epochs of no improvement
+    verbose=1,
+    factor=0.2,      # Drop LR by 80% (0.1 is also common)
+    min_lr=1e-7      # Don't let it go lower than this
+)
+
+# 2. The Safety Net (Stopping)
+early_stop = EarlyStopping(
+    monitor='val_loss',
+    patience=6,      # Give it more time than the LR reduction
+    restore_best_weights=True
+)
+
+history = model.fit(
+    train_dataset,
+    validation_data = val_dataset,
+    epochs = 1,
+    class_weight = class_weights,
+    callbacks=[lr_reduction, early_stop],
+)
+
+print(f'Loss: {loss*100}')
+print(f'Accuracy: {accuracy*100}')
+print(f'Precision: {precision*100}')
+print(f'Recall: {recall*100}')
+
+from sklearn.metrics import confusion_matrix, classification_report
+
+y_true = np.concatenate([y for x, y in test_dataset], axis=0)
+y_pred = model.predict(test_dataset)
+y_pred = (y_pred > 0.5).astype(int)
+cm = confusion_matrix(y_true, y_pred)
+cm
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=['Normal', 'Pneumonia'],
+            yticklabels=['Normal', 'Pneumonia'])
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.title('Confusion Matrix: Pneumonia Detection')
+plt.show()
